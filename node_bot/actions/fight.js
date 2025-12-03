@@ -72,7 +72,7 @@ function findNearestMob(bot, mobType, radius) {
                        'cave_spider', 'silverfish', 'vindicator', 'evoker', 'pillager'];
   
   let nearestMob = null;
-  let nearestDistance = radius;
+  let nearestDistance = 20;
 
   for (const entityId in bot.entities) {
     const entity = bot.entities[entityId];
@@ -82,7 +82,7 @@ function findNearestMob(bot, mobType, radius) {
     
     // Calculate distance
     const distance = bot.entity.position.distanceTo(entity.position);
-    if (distance > radius) continue;
+    if (distance > nearestDistance) continue;
 
     // Check mob type
     const entityName = entity.name || entity.displayName || '';
