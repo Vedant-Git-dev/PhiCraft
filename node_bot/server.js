@@ -15,6 +15,7 @@ import { navigateTo } from './utils/navigation.js';
 import { log, logError, logSuccess, logWarning } from './utils/logger.js';
 import CraftingChain from './utils/craftingChain.js';
 import axios from 'axios';
+import { initRecipeSystem } from './actions/craft.js';
 
 dotenv.config();
 
@@ -80,6 +81,13 @@ function createBot() {
     
     craftingChain = new CraftingChain(bot);
     logSuccess('⛓️ Crafting chain system initialized');
+
+    try {
+      await initRecipeSystem(bot);
+      logSuccess('📚 Recipe database loaded!');
+    } catch (error) {
+      logWarning(`Recipe database failed: ${error.message}`);
+    }
     
     log(`📍 Position: ${bot.entity.position}`);
     log(`❤️ Health: ${bot.health}`);
@@ -97,6 +105,7 @@ function createBot() {
         logWarning('⚠️ AI server not connected');
       }
     }, 2000);
+
   });
 
   bot.on('chat', async (username, message) => {
@@ -282,7 +291,7 @@ async function processInGameCommand(username, commandText) {
         playerName: username  // IMPORTANT: Send player name
       },
       { 
-        timeout: 30000,
+        timeout: 50000,
         headers: { 'Content-Type': 'application/json' },
         validateStatus: (status) => status < 600
       }
