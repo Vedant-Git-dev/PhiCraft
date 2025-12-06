@@ -68,18 +68,17 @@ export function getRequiredToolTier(blockName) {
 }
 
 /**
- * Check if player has adequate tool for mining
- * SUPER DEBUG VERSION with extensive logging
+ * Check if player has adequate tool for mining a block
  */
 export function hasAdequateTool(bot, blockName) {
-  log(`\n🔍 === TOOL CHECK DEBUG FOR ${blockName} ===`);
+  log(`\n=== TOOL CHECK DEBUG FOR ${blockName} ===`);
   
   const requirement = getRequiredToolTier(blockName);
   
   // No tool required
   if (requirement.tier === 'none') {
-    log(`✓ No tool required for ${blockName}`);
-    log(`🔍 ================================\n`);
+    log(`No tool required for ${blockName}`);
+    log(`================================\n`);
     return { 
       hasTooling: true, 
       toolName: 'hand',
@@ -88,10 +87,10 @@ export function hasAdequateTool(bot, blockName) {
   }
 
   const requiredTierIndex = TIER_ORDER.indexOf(requirement.tier);
-  log(`📊 Required tier index: ${requiredTierIndex} (${requirement.tier})`);
+  log(`Required tier index: ${requiredTierIndex} (${requirement.tier})`);
   
   if (requiredTierIndex === -1) {
-    logError(`❌ Invalid tier: ${requirement.tier}`);
+    logError(`Invalid tier: ${requirement.tier}`);
     log(`🔍 ================================\n`);
     return { 
       hasTooling: false, 
@@ -104,17 +103,17 @@ export function hasAdequateTool(bot, blockName) {
 
   // Get ALL items in inventory
   const allItems = bot.inventory.items();
-  log(`📦 Total items in inventory: ${allItems.length}`);
+  log(`Total items in inventory: ${allItems.length}`);
   
   // Log ALL items for debugging
-  log(`📦 Full inventory:`);
+  log(`Full inventory:`);
   allItems.forEach(item => {
     log(`   - ${item.name} x${item.count} (id: ${item.type})`);
   });
 
   // Filter for the required tool type
   const toolType = requirement.tool;
-  log(`\n🔧 Looking for tool type: ${toolType}`);
+  log(`\nLooking for tool type: ${toolType}`);
   
   const matchingTools = allItems.filter(item => {
     const matches = item.name.includes(toolType);
@@ -128,8 +127,8 @@ export function hasAdequateTool(bot, blockName) {
   });
 
   if (matchingTools.length === 0) {
-    logError(`❌ No ${toolType} found in inventory!`);
-    log(`🔍 ================================\n`);
+    logError(`No ${toolType} found in inventory!`);
+    log(`================================\n`);
     return { 
       hasTooling: false, 
       toolName: null,
@@ -143,7 +142,7 @@ export function hasAdequateTool(bot, blockName) {
   let bestTool = null;
   let bestTierIndex = -1;
 
-  log(`\n🎯 Checking tool tiers (need ${requirement.tier} or better):`);
+  log(`\nChecking tool tiers (need ${requirement.tier} or better):`);
   
   for (const tool of matchingTools) {
     log(`   Checking ${tool.name}...`);
@@ -172,7 +171,7 @@ export function hasAdequateTool(bot, blockName) {
     }
   }
 
-  log(`\n🏆 Final result:`);
+  log(`\nFinal result:`);
   if (bestTool) {
     logSuccess(`   ✓ Best tool: ${bestTool.name} (tier: ${TIER_ORDER[bestTierIndex]})`);
     log(`🔍 ================================\n`);
@@ -182,10 +181,10 @@ export function hasAdequateTool(bot, blockName) {
       equipped: bestTool
     };
   } else {
-    logError(`   ❌ No adequate tool found`);
+    logError(`   No adequate tool found`);
     log(`   Need: ${requirement.tier} ${toolType} or better`);
     log(`   Have: ${matchingTools.map(t => t.name).join(', ')}`);
-    log(`🔍 ================================\n`);
+    log(`================================\n`);
     return { 
       hasTooling: false, 
       toolName: null,
@@ -276,9 +275,9 @@ export function logToolRequirement(blockName) {
   const requirement = getRequiredToolTier(blockName);
   
   if (requirement.tier === 'none') {
-    log(`ℹ️  ${blockName} can be mined with hand`);
+    log(`${blockName} can be mined with hand`);
   } else {
-    log(`ℹ️  ${blockName} requires ${requirement.tier} ${requirement.tool} or better`);
+    log(`  ${blockName} requires ${requirement.tier} ${requirement.tool} or better`);
   }
 }
 
@@ -294,7 +293,7 @@ export function listInventoryTools(bot) {
   );
   
   if (tools.length === 0) {
-    log('❌ No tools in inventory');
+    log(' No tools in inventory');
     return;
   }
   

@@ -35,6 +35,9 @@ export async function mine(bot, params) {
         break;
       }
 
+      // Equip appropriate tool BEFORE mining
+      await equipBestToolForBlock(bot, block, blockType);
+
       log(`Found ${blockType} at ${block.position}`);
 
       // Navigate to block
@@ -46,7 +49,6 @@ export async function mine(bot, params) {
       
       await bot.pathfinder.goto(goal);
 
-      // Equip appropriate tool BEFORE mining
       await equipBestToolForBlock(bot, block, blockType);
 
       // Mine the block
@@ -97,9 +99,19 @@ async function equipBestToolForBlock(bot, block, blockType) {
   // Check if we have adequate tool
   const toolCheck = toolValidator.hasAdequateTool(bot, blockType);
   
+  let getTool;
+
   if (!toolCheck.hasTooling) {
-    logError(`❌ Missing required tool: ${toolCheck.requiredTool}`);
-    throw new Error(`Cannot mine ${blockType} - need ${toolCheck.requiredTool} or better`);
+    logError(` Missing required tool: ${toolCheck.requiredTool}`);
+    getTool = await import('./craft.js');
+    log(`Attempting to craft ${toolCheck.requiredTool}...`);
+    
+    try {
+      await getTool.craftItem(bot, { itemName: toolCheck.requiredTool, count: 1 });
+      logSuccess(`Crafted ${toolCheck.requiredTool}`);
+    } catch (error) {
+      logError(`Failed to craft ${toolCheck.requiredTool}: ${error.message}`);
+    }
   }
 
   // Get the best tool
