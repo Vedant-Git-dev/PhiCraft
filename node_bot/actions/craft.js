@@ -1,184 +1,26 @@
 import minecraftData from 'minecraft-data';
 import { log, logError, logSuccess, logWarning } from '../utils/logger.js';
-import { Vec3 } from 'vec3';
-import loadRecipes from "prismarine-recipe";
+import { initRecipeSystem, getRecipeManager, normalizeItemName } from '../utils/recipeManager.js';
+import { hasAdequateTool, logToolRequirement } from '../utils/toolValidator.js';
+import { ensureCraftingTableAccess } from '../utils/craftingTableManager.js';
 
 /**
- * Recipe system using prismarine-recipe to load ALL recipes at startup
- * Doesn't require materials to see recipes!
- */
-
-class RecipeManager {
-  constructor(bot) {
-    this.bot = bot;
-    this.mcData = minecraftData(bot.version);
-    this.recipes = null;
-    this.recipesByName = {};
-    this.initialized = false;
-  }
-
-  /**
-   * Load all recipes from minecraft-data
-   */
-  async initialize() {
-    if (this.initialized) return;
-
-    log('Loading recipe database...');
-
-    try {
-      // // Load recipe system
-      // const Recipe = loadRecipes("1.8");
-      
-      // Get all recipes from minecraft-data
-      const recipeData = this.mcData.recipes;
-      
-      if (!recipeData) {
-        logWarning('No recipe data in minecraft-data');
-        this.initialized = true;
-        return;
-      }
-      // Index recipes by item name
-       for (const recipeId in recipeData) {
-        const recipe = recipeData[recipeId];
-        if (recipe[0].result && recipe[0].result.id) {
-          const item = this.mcData.items[recipe[0].result.id];
-          if (item) {
-            if (!this.recipesByName[item.name]) {
-              this.recipesByName[item.name] = [];
-            }
-            this.recipesByName[item.name].push(recipe[0]);
-          }
-        }
-      }
-
-      log(`Loaded ${Object.keys(this.recipesByName).length} recipe types`);
-      this.initialized = true;
-
-    } catch (error) {
-      logWarning(`Could not load recipe database: ${error.message}`);
-      this.initialized = true;
-    }
-  }
-
-  /**
-   * Get recipe for item (no materials needed!)
-   */
-  getRecipe(itemName) {
-    if (!this.initialized) {
-      logWarning('Recipe manager not initialized');
-      return null;
-    }
-
-    const recipes = this.recipesByName[itemName];
-    if (!recipes || recipes.length === 0) {
-      return null;
-    }
-
-    return recipes[0]; // Return first recipe
-  }
-
-  /**
-   * Get ingredients from recipe
-   */
-  getIngredients(recipe) {
-    const ingredients = {};
-
-    if (recipe.inShape) {
-      // Shaped recipe
-      for (const row of recipe.inShape) {
-        for (const itemId of row) {
-          if (itemId && itemId > 0) {
-            const item = this.mcData.items[itemId];
-            if (item) {
-              ingredients[item.name] = (ingredients[item.name] || 0) + 1;
-            }
-          }
-        }
-      }
-    } else if (recipe.ingredients) {
-      // Shapeless recipe
-      for (const itemId of recipe.ingredients) {
-        if (itemId && itemId > 0) {
-          const item = this.mcData.items[itemId];
-          if (item) {
-            ingredients[item.name] = (ingredients[item.name] || 0) + 1;
-          }
-        }
-      }
-    }
-
-    return ingredients;
-  }
-}
-
-// Global recipe manager
-let recipeManager = null;
-
-/**
- * Initialize recipe manager
- */
-export async function initRecipeSystem(bot) {
-  recipeManager = new RecipeManager(bot);
-  await recipeManager.initialize();
-}
-
-/**
- * Normalize item name
- */
-function normalizeItemName(itemName, mcData) {
-  let normalized = itemName.toLowerCase().trim();
-  
-  const aliases = {
-    'plank': 'oak_planks',
-    'planks': 'oak_planks',
-    'log': 'oak_log',
-    'stick': 'stick',
-    'sticks': 'stick',
-    'pickaxe': 'wooden_pickaxe',
-    'pick': 'wooden_pickaxe',
-    'sword': 'wooden_sword',
-    'axe': 'wooden_axe',
-    'shovel': 'wooden_shovel'
-  };
-  
-  if (aliases[normalized]) {
-    return aliases[normalized];
-  }
-  
-  if (mcData.itemsByName[normalized]) {
-    return normalized;
-  }
-  
-  // Try removing/adding 's'
-  if (normalized.endsWith('s')) {
-    const singular = normalized.slice(0, -1);
-    if (mcData.itemsByName[singular]) {
-      return singular;
-    }
-  } else {
-    const plural = normalized + 's';
-    if (mcData.itemsByName[plural]) {
-      return plural;
-    }
-  }
-  
-  return normalized;
-}
-
-/**
- * Main craft function using recipe database
+ * Main craft function - orchestrates the crafting process
  */
 export async function craftItem(bot, params) {
   const { itemName, count = 1 } = params;
   const mcData = minecraftData(bot.version);
 
+  // Initialize recipe system if not already done
+  let recipeManager = getRecipeManager();
   if (!recipeManager) {
     await initRecipeSystem(bot);
+    recipeManager = getRecipeManager();
   }
 
   log(`Attempting to craft ${count}x ${itemName}`);
 
-  // Normalize name
+  // Normalize item name
   const normalizedName = normalizeItemName(itemName, mcData);
   const item = mcData.itemsByName[normalizedName];
 
@@ -188,12 +30,11 @@ export async function craftItem(bot, params) {
 
   log(`Item: ${normalizedName}`);
 
-  // Get recipe from database (NO MATERIALS NEEDED!)
+  // Get recipe from database
   const recipe = recipeManager.getRecipe(normalizedName);
   
   if (!recipe) {
-    // Fallback to bot's recipe system
-    return await craftWithBotRecipe(bot, normalizedName, count, item, mcData);
+    throw new Error(`No recipe found for ${normalizedName}`);
   }
 
   log(`Found recipe in database`);
@@ -202,24 +43,27 @@ export async function craftItem(bot, params) {
   const ingredients = recipeManager.getIngredients(recipe);
   log(`Ingredients needed: ${JSON.stringify(ingredients)}`);
 
-  // Gather materials
+  // Gather all required materials
   for (const [ingName, ingCount] of Object.entries(ingredients)) {
     await gatherMaterial(bot, ingName, ingCount * count, mcData);
   }
 
-  // Check if need crafting table
+  // Check if we need a crafting table
   let table = null;
-  if (recipe.inShape && recipe.inShape.length > 2) {
-    table = await findOrPlaceCraftingTable(bot, mcData);
+  const needsTable = recipeManager.needsCraftingTable(recipe);
+  
+  if (needsTable) {
+    log('Recipe requires crafting table');
+    table = await ensureCraftingTableAccess(bot, mcData);
   }
 
-  // Now use bot.craft() with the actual recipe
+  // Perform crafting
   let crafted = 0;
-  let id = mcData.itemsByName[item.name].id;
+  const itemId = item.id;
 
   try {
-    // Get the bot's recipe object now that we have materials
-    const botRecipes = bot.recipesFor(id, null, null, table);
+    // Get bot's recipe object (now that we have materials)
+    const botRecipes = bot.recipesFor(itemId, null, null, table);
     
     if (!botRecipes || botRecipes.length === 0) {
       throw new Error(`Bot cannot find recipe even with materials`);
@@ -227,6 +71,7 @@ export async function craftItem(bot, params) {
 
     const botRecipe = botRecipes[0];
 
+    // Craft the items
     for (let i = 0; i < count; i++) {
       await bot.craft(botRecipe, 1, table);
       crafted++;
@@ -251,41 +96,7 @@ export async function craftItem(bot, params) {
 }
 
 /**
- * Fallback to bot recipe system
- */
-async function craftWithBotRecipe(bot, itemName, count, item, mcData) {
-  log(`Using bot recipe system for ${itemName}`);
-
-  let table = await findOrPlaceCraftingTable(bot, mcData);
-  const recipes = bot.recipesFor(item.id, null, null, table);
-
-  if (!recipes || recipes.length === 0) {
-    throw new Error(`No recipe found for ${itemName}`);
-  }
-
-  const recipe = recipes[0];
-  let crafted = 0;
-
-  for (let i = 0; i < count; i++) {
-    try {
-      await bot.craft(recipe, 1, table);
-      crafted++;
-      await sleep(100);
-    } catch (err) {
-      logError(`Craft failed: ${err.message}`);
-      break;
-    }
-  }
-
-  return {
-    success: crafted > 0,
-    crafted,
-    message: crafted > 0 ? `Crafted ${crafted}x ${itemName}` : `Failed to craft ${itemName}`
-  };
-}
-
-/**
- * Gather material (craft or mine)
+ * Gather material - either craft it or mine it
  */
 async function gatherMaterial(bot, itemName, amount, mcData) {
   const item = mcData.itemsByName[itemName];
@@ -304,6 +115,7 @@ async function gatherMaterial(bot, itemName, amount, mcData) {
   log(`Need ${needed}x ${itemName} (have ${have})`);
 
   // Check if we can craft it
+  const recipeManager = getRecipeManager();
   if (recipeManager) {
     const recipe = recipeManager.getRecipe(itemName);
     if (recipe) {
@@ -318,19 +130,29 @@ async function gatherMaterial(bot, itemName, amount, mcData) {
 }
 
 /**
- * Mine for an item
+ * Mine for an item with tool validation
  */
 async function mineForItem(bot, itemName, amount, mcData) {
+  // Block mappings for items that come from mining
   const blockMappings = {
     'oak_log': 'oak_log',
     'spruce_log': 'spruce_log',
     'birch_log': 'birch_log',
+    'jungle_log': 'jungle_log',
+    'acacia_log': 'acacia_log',
+    'dark_oak_log': 'dark_oak_log',
     'cobblestone': 'stone',
     'coal': 'coal_ore',
     'iron_ingot': 'iron_ore',
     'diamond': 'diamond_ore',
+    'gold_ingot': 'gold_ore',
+    'redstone': 'redstone_ore',
+    'emerald': 'emerald_ore',
+    'lapis_lazuli': 'lapis_ore',
+    'copper_ingot': 'copper_ore',
     'stick': null, // Must craft
-    'oak_planks': null // Must craft
+    'oak_planks': null, // Must craft
+    'planks': null // Must craft
   };
 
   const blockName = blockMappings[itemName];
@@ -346,6 +168,38 @@ async function mineForItem(bot, itemName, amount, mcData) {
     throw new Error(`Unknown block: ${blockToMine}`);
   }
 
+  // Log tool requirement
+  logToolRequirement(blockToMine);
+
+  // Validate tool requirement
+  const toolCheck = hasAdequateTool(bot, blockToMine);
+  
+  if (!toolCheck.hasTooling) {
+    log(`⚠️ Need ${toolCheck.requiredTool} to mine ${blockToMine}`);
+    log(`Attempting to craft ${toolCheck.requiredTool}...`);
+    
+    try {
+      // Recursively craft the required tool
+      await craftItem(bot, { 
+        itemName: toolCheck.requiredTool, 
+        count: 1 
+      });
+      logSuccess(`Crafted ${toolCheck.requiredTool}`);
+      
+      // Re-check after crafting
+      const recheckTool = hasAdequateTool(bot, blockToMine);
+      if (!recheckTool.hasTooling) {
+        throw new Error(`Still cannot mine ${blockToMine} after crafting tool`);
+      }
+      
+    } catch (error) {
+      throw new Error(`Cannot mine ${blockToMine} - need ${toolCheck.requiredTool} but failed to craft it: ${error.message}`);
+    }
+  } else {
+    log(`✓ Have adequate tool: ${toolCheck.toolName}`);
+  }
+
+  // Find the block
   const block = bot.findBlock({
     matching: blockData.id,
     maxDistance: 64
@@ -357,83 +211,17 @@ async function mineForItem(bot, itemName, amount, mcData) {
 
   log(`Mining ${amount}x ${blockToMine}`);
   
+  // Use the mine action
   const { mine } = await import('./mine.js');
   await mine(bot, { blockType: blockToMine, count: amount });
 }
 
 /**
- * Find or place crafting table
+ * Utility sleep function
  */
-async function findOrPlaceCraftingTable(bot, mcData) {
-  let table = bot.findBlock({
-    matching: mcData.blocksByName.crafting_table.id,
-    maxDistance: 32
-  });
-
-  if (table) {
-    return table;
-  }
-
-  log('Placing crafting table...');
-
-  // Check inventory
-  let tableItem = bot.inventory.items().find(i => i.name === 'crafting_table');
-
-  if (!tableItem) {
-    // Craft one
-    log('Crafting crafting table...');
-    
-    // Need 4 planks
-    const planks = bot.inventory.items().find(i => i.name.includes('planks'));
-    
-    if (!planks || planks.count < 4) {
-      // Make planks
-      const logs = bot.inventory.items().find(i => 
-        i.name.includes('log') && !i.name.includes('stripped')
-      );
-
-      if (!logs) {
-        throw new Error('Need logs for crafting table');
-      }
-
-      // Craft planks from logs
-      await gatherMaterial(bot, 'oak_planks', 4, mcData);
-    }
-
-    // Craft table
-    if (recipeManager) {
-      await craftItem(bot, { itemName: 'crafting_table', count: 1 });
-    }
-  }
-
-  // Place it
-  try {
-    tableItem = bot.inventory.items().find(i => i.name === 'crafting_table');
-    if (!tableItem) throw new Error('No table');
-
-    const refBlock = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-    await bot.equip(tableItem, 'hand');
-    await bot.placeBlock(refBlock, new Vec3(0, 1, 0));
-    
-    await sleep(500);
-    
-    table = bot.findBlock({
-      matching: mcData.blocksByName.crafting_table.id,
-      maxDistance: 5
-    });
-
-    if (table) {
-      logSuccess('Placed crafting table');
-    }
-
-    return table;
-
-  } catch (err) {
-    logError(`Failed to place table: ${err.message}`);
-    return null;
-  }
-}
-
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// Export for use by other modules
+export { initRecipeSystem };

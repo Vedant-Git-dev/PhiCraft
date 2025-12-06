@@ -1,10 +1,10 @@
 import pathfinderPlugin from 'mineflayer-pathfinder';
 const { goals } = pathfinderPlugin;
 import minecraftData from 'minecraft-data';
-import { log, logError, logSuccess } from '../utils/logger.js';
+import { log, logError, logSuccess, logWarning } from '../utils/logger.js';
 
 /**
- * Mine a specific block type
+ * Mine a specific block type with proper tool validation
  * @param {Object} bot - Mineflayer bot instance
  * @param {Object} params - { blockType: string, count: number }
  */
@@ -46,8 +46,8 @@ export async function mine(bot, params) {
       
       await bot.pathfinder.goto(goal);
 
-      // Equip appropriate tool
-      await equipBestTool(bot, block);
+      // Equip appropriate tool BEFORE mining
+      await equipBestToolForBlock(bot, block, blockType);
 
       // Mine the block
       await bot.dig(block);
@@ -72,8 +72,57 @@ export async function mine(bot, params) {
 
 /**
  * Equip the best tool for mining a block
+ * ENHANCED: Uses tool validator to check requirements
  */
-async function equipBestTool(bot, block) {
+async function equipBestToolForBlock(bot, block, blockType) {
+  log(`\n=== TOOL SELECTION FOR ${blockType} ===`);
+  
+  // Import tool validator
+  let toolValidator;
+  try {
+    toolValidator = await import('../utils/toolValidator.js');
+  } catch (error) {
+    logWarning('Tool validator not available, using basic tool selection');
+    return await equipBestToolBasic(bot, block);
+  }
+
+  // List all tools in inventory for debugging
+  log('Current inventory tools:');
+  toolValidator.listInventoryTools(bot);
+
+  // Check what tool we need
+  const requirement = toolValidator.getRequiredToolTier(blockType);
+  log(`Block requirement: ${requirement.tier} ${requirement.tool} or better`);
+
+  // Check if we have adequate tool
+  const toolCheck = toolValidator.hasAdequateTool(bot, blockType);
+  
+  if (!toolCheck.hasTooling) {
+    logError(`❌ Missing required tool: ${toolCheck.requiredTool}`);
+    throw new Error(`Cannot mine ${blockType} - need ${toolCheck.requiredTool} or better`);
+  }
+
+  // Get the best tool
+  const bestTool = toolValidator.getBestToolForBlock(bot, blockType);
+  
+  if (bestTool) {
+    try {
+      await bot.equip(bestTool, 'hand');
+      logSuccess(`✓ Equipped: ${bestTool.name}`);
+      log(`===========================\n`);
+    } catch (error) {
+      logError(`Failed to equip ${bestTool.name}: ${error.message}`);
+    }
+  } else {
+    log(`Using hand (no tool required)`);
+    log(`===========================\n`);
+  }
+}
+
+/**
+ * Fallback: Basic tool selection without validator
+ */
+async function equipBestToolBasic(bot, block) {
   const tools = bot.inventory.items().filter(item => {
     return item.name.includes('pickaxe') ||
            item.name.includes('axe') ||
@@ -81,24 +130,32 @@ async function equipBestTool(bot, block) {
   });
 
   if (tools.length === 0) {
-    return; // No tools, use hand
+    log('No tools found, using hand');
+    return;
   }
 
-  // Find best tool based on block type
+  // Find best tool based on block dig time
   let bestTool = null;
-  let bestSpeed = 0;
+  let bestSpeed = Infinity;
 
   for (const tool of tools) {
-    const digTime = block.digTime(tool);
-    if (digTime > 0 && (bestTool === null || digTime < bestSpeed)) {
-      bestTool = tool;
-      bestSpeed = digTime;
+    try {
+      const digTime = block.digTime(tool);
+      if (digTime > 0 && digTime < bestSpeed) {
+        bestTool = tool;
+        bestSpeed = digTime;
+      }
+    } catch (error) {
+      // Ignore errors for invalid tools
+      continue;
     }
   }
 
   if (bestTool) {
     await bot.equip(bestTool, 'hand');
-    log(`Equipped ${bestTool.name}`);
+    log(`Equipped ${bestTool.name} (dig time: ${bestSpeed.toFixed(2)}s)`);
+  } else {
+    log('No suitable tool found, using hand');
   }
 }
 
