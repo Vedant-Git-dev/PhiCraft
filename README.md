@@ -397,8 +397,7 @@ Player: follow me
 **Solutions**:
 1. Check recipe database loaded: Look for "Loaded X recipes" in logs
 2. Verify item name: Use exact Minecraft item names
-3. Give processed materials: Bot can't smelt (give iron_ingot not iron_ore)
-4. Check inventory space: Bot needs empty slots
+3. Check inventory space: Bot needs empty slots
 
 ### Slow Response
 
@@ -477,7 +476,7 @@ npm run lint
 - [x] Advanced crafting with auto-gathering
 - [x] Combat system
 - [x] Farming automation
-- [x] Smelting Mechanism
+- [x] Autonomous Smelting System
 - [ ] Web dashboard for control
 - [ ] Discord bot integration
 - [ ] Multi-bot coordination
