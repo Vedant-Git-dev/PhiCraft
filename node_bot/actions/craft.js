@@ -3,9 +3,12 @@ import { log, logError, logSuccess, logWarning } from '../utils/logger.js';
 import { initRecipeSystem, getRecipeManager, normalizeItemName } from '../utils/recipeManager.js';
 import { hasAdequateTool, logToolRequirement } from '../utils/toolValidator.js';
 import { ensureCraftingTableAccess } from '../utils/craftingTableManager.js';
+import { isSmeltable, getSmeltingInput } from '../utils/smeltingRecipes.js';
+import SmeltingManager from '../utils/smeltingManager.js';
 
 /**
  * Main craft function - orchestrates the crafting process
+ * NOW WITH SMELTING INTEGRATION
  */
 export async function craftItem(bot, params) {
   const { itemName, count = 1 } = params;
@@ -30,6 +33,13 @@ export async function craftItem(bot, params) {
 
   log(`Item: ${normalizedName}`);
 
+  // Check if this item needs smelting instead of crafting
+  if (isSmeltable(normalizedName)) {
+    log(`${normalizedName} requires smelting, not crafting`);
+    const smeltingManager = new SmeltingManager(bot);
+    return await smeltingManager.smeltItem(normalizedName, count);
+  }
+
   // Get recipe from database
   const recipe = recipeManager.getRecipe(normalizedName);
   
@@ -43,7 +53,7 @@ export async function craftItem(bot, params) {
   const ingredients = recipeManager.getIngredients(recipe);
   log(`Ingredients needed: ${JSON.stringify(ingredients)}`);
 
-  // Gather all required materials
+  // Gather all required materials (with smelting support)
   for (const [ingName, ingCount] of Object.entries(ingredients)) {
     await gatherMaterial(bot, ingName, ingCount * count, mcData);
   }
@@ -96,7 +106,8 @@ export async function craftItem(bot, params) {
 }
 
 /**
- * Gather material - either craft it or mine it
+ * Gather material - either craft it, smelt it, or mine it
+ * ENHANCED WITH SMELTING SUPPORT
  */
 async function gatherMaterial(bot, itemName, amount, mcData) {
   const item = mcData.itemsByName[itemName];
@@ -107,12 +118,20 @@ async function gatherMaterial(bot, itemName, amount, mcData) {
   const have = bot.inventory.count(item.id);
   
   if (have >= amount) {
-    log(`✓ Have ${have}x ${itemName}`);
+    log(`Already have ${have}x ${itemName}`);
     return;
   }
 
   const needed = amount - have;
   log(`Need ${needed}x ${itemName} (have ${have})`);
+
+  // Check if this material requires smelting
+  if (isSmeltable(itemName)) {
+    log(`${itemName} requires smelting`);
+    const smeltingManager = new SmeltingManager(bot);
+    await smeltingManager.smeltItem(itemName, needed);
+    return;
+  }
 
   // Check if we can craft it
   const recipeManager = getRecipeManager();
@@ -143,16 +162,22 @@ async function mineForItem(bot, itemName, amount, mcData) {
     'dark_oak_log': 'dark_oak_log',
     'cobblestone': 'stone',
     'coal': 'coal_ore',
-    'iron_ingot': 'iron_ore',
+    'raw_iron': 'iron_ore',
+    'raw_gold': 'gold_ore',
+    'raw_copper': 'copper_ore',
+    'iron_ore': 'iron_ore',
+    'gold_ore': 'gold_ore',
+    'copper_ore': 'copper_ore',
     'diamond': 'diamond_ore',
-    'gold_ingot': 'gold_ore',
     'redstone': 'redstone_ore',
     'emerald': 'emerald_ore',
     'lapis_lazuli': 'lapis_ore',
-    'copper_ingot': 'copper_ore',
-    'stick': null, // Must craft
-    'oak_planks': null, // Must craft
-    'planks': null // Must craft
+    'dirt': 'dirt',
+    'sand': 'sand',
+    'gravel': 'gravel',
+    'stick': null,
+    'oak_planks': null,
+    'planks': null
   };
 
   const blockName = blockMappings[itemName];
@@ -175,7 +200,7 @@ async function mineForItem(bot, itemName, amount, mcData) {
   const toolCheck = hasAdequateTool(bot, blockToMine);
   
   if (!toolCheck.hasTooling) {
-    log(`⚠️ Need ${toolCheck.requiredTool} to mine ${blockToMine}`);
+    log(`Need ${toolCheck.requiredTool} to mine ${blockToMine}`);
     log(`Attempting to craft ${toolCheck.requiredTool}...`);
     
     try {
@@ -196,7 +221,7 @@ async function mineForItem(bot, itemName, amount, mcData) {
       throw new Error(`Cannot mine ${blockToMine} - need ${toolCheck.requiredTool} but failed to craft it: ${error.message}`);
     }
   } else {
-    log(`✓ Have adequate tool: ${toolCheck.toolName}`);
+    log(`Have adequate tool: ${toolCheck.toolName}`);
   }
 
   // Find the block

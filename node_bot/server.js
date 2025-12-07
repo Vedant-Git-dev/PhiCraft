@@ -258,6 +258,11 @@ async function executeAction(action, params, username) {
       showStatus();
       result = { success: true, message: 'Status shown' };
       break;
+
+    case 'smelt':
+      const { smelt } = await import('./actions/smelt.js');
+      result = await smelt(bot, params);
+      break;
     
     default:
       bot.chat(`❌ Unknown action: ${action}`);
@@ -400,7 +405,8 @@ function getActionEmoji(action) {
     follow: '🏃',
     give: '🎁',
     navigate: '🗺️',
-    respond: '💬'
+    respond: '💬',
+    smelt: '🔥'  
   };
   return emojis[action] || '⚙️';
 }
@@ -421,6 +427,8 @@ function getActionDescription(action, params) {
       return `Giving ${params.itemName} to ${params.playerName}`;
     case 'navigate':
       return `Going to ${params.x}, ${params.y}, ${params.z}`;
+    case 'smelt':  // ADD THIS
+      return `Smelting ${params.count || 1}x ${params.itemName}`;
     default:
       return action;
   }
