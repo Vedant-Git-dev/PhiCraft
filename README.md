@@ -16,15 +16,21 @@ An intelligent Minecraft bot powered by fine-tuned Phi-3 LLM with natural langua
 
 ### 🛠️ Autonomous Capabilities
 - **Intelligent Mining**: Finds and mines specific blocks with pathfinding
-- **Advanced Crafting**: Crafts items that don’t require a crafting table (planks, sticks, slabs, crafting table itself). Auto-gathering for complex recipes (needing crafting table) is under development.
+- **Advanced Crafting**: Crafts items by auto-gathering missing ingredients for complex recipes.
 - **Combat System**: Can attack specified mobs with autonomous weapon selection on command (e.g., "kill that zombie"). Full autonomous combat coming soon.
 - **Automated Farming**: Harvests and replants crops autonomously
+- **Autonomous Smelting System**: Bot can now smelt items end-to-end using Mineflayer’s Furnace API. Automatically detects smeltable items (iron ore → ingots, sand → glass), gathers fuel, finds or crafts a furnace, places it, smelts asynchronously, 
+  and integrates outputs into the crafting chain.
 
-### ⚡ Advanced Crafting Chain
-- **Recursive Material Gathering**: Automatically determines and collects required materials for non–crafting-table recipes (full auto-gathering for crafting-table items coming soon)
-- **Dependency Resolution**: Crafts intermediate items (planks from logs, sticks from planks)
-- **Recipe Database**: Knows all crafting recipes without needing materials first
-- **Smart Optimization**: Searches inventory before gathering
+
+### ⚡ Advanced Crafting & Smelting Chain
+- **Recursive Crafting + Smelting**: Bot automatically gathers raw materials, smelts required resources,
+  and crafts intermediate components before producing the final output.
+- **Smelting Integration**: If a recipe requires processed items (e.g., iron_ingot), the bot:
+  (1) mines raw items, (2) finds or crafts a furnace, (3) collects fuel, (4) smelts items,
+  and (5) proceeds with crafting.
+- **Fuel Efficiency Management**: Dynamically selects the most efficient available fuel 
+  (coal > charcoal > logs > planks) and avoids unnecessary fuel usage.
 
 ### 🚀 AI-Powered Architecture
 - **Fine-tuned Phi-3**: Quantized GGUF model optimized for Minecraft tasks
@@ -317,8 +323,15 @@ give me diamonds         # Natural language
 ```bash
 !help                    # Show command list
 !stop                    # Stop current action
-!test                    # Test AI connection
 ```
+
+### Smelting
+```bash
+!smelt <item> [count]        # Smelt any smeltable item
+smelt iron ore               # Natural language smelting
+make me iron ingots          # Full pipeline: mine → fuel → furnace → smelt
+```
+
 
 ## 🎯 Advanced Features
 
@@ -464,13 +477,13 @@ npm run lint
 - [x] Advanced crafting with auto-gathering
 - [x] Combat system
 - [x] Farming automation
+- [x] Smelting Mechanism
 - [ ] Web dashboard for control
 - [ ] Discord bot integration
 - [ ] Multi-bot coordination
 - [ ] Building automation
 - [ ] Trading system
 - [ ] Voice command support
-- [ ] Fine-tuning pipeline
 - [ ] Docker deployment
 
 ## 📈 Project Stats
