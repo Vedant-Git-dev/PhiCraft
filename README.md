@@ -149,8 +149,8 @@ Bot: ✅ All steps completed!
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/minecraft-ai-bot.git
-cd minecraft-ai-bot
+git clone https://github.com/Vedant-Git-dev/PhiCraft.git
+cd PhiCraft 
 ```
 
 ### 2. Install Node.js Dependencies
@@ -160,7 +160,7 @@ cd node_bot
 npm install mineflayer mineflayer-pathfinder mineflayer-armor-manager mineflayer-collectblock mineflayer-pvp vec3
 ```
 
-### 3. Install Python Dependencies (Optional - for local AI)
+### 3. Install Python Dependencies
 
 ```bash
 cd ../python_ai
