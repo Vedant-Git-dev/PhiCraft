@@ -16,6 +16,13 @@ import { log, logError, logSuccess, logWarning } from './utils/logger.js';
 import CraftingChain from './utils/craftingChain.js';
 import axios from 'axios';
 import { initRecipeSystem } from './actions/craft.js';
+import { 
+  loadBlueprint,
+  getRequiredMaterials,
+  buildStructure,
+  previewBuild,
+  listSchematics
+} from './actions/build.js';
 
 dotenv.config();
 
@@ -26,6 +33,8 @@ let bot = null;
 let currentAction = null;
 let craftingChain = null;
 let isProcessing = false;
+let currentBlueprint = null;
+
 
 const COLAB_SERVER_URL = process.env.COLAB_SERVER_URL || 'http://localhost:5000';
 
@@ -169,6 +178,163 @@ function createBot() {
       return;
     }
 
+    if (commandText.toLowerCase() === 'list blueprints' || 
+      commandText.toLowerCase() === 'list schematics') {
+      try {
+        const result = await listSchematics(bot, { directory: './schematics' });
+        if (result.schematics.length === 0) {
+          bot.chat('No blueprints found');
+        } else {
+          bot.chat(`Blueprints (${result.count}):`);
+          result.schematics.slice(0, 5).forEach(name => bot.chat(`  ${name}`));
+        }
+      } catch (error) {
+        bot.chat(`Error: ${error.message}`);
+      }
+      return;
+}
+    if (commandText.toLowerCase().startsWith('load blueprint ')) {
+  try {
+    const name = commandText.replace(/load blueprint /i, '').trim();
+    const path = `./schematics/${name}`;
+    bot.chat(`Loading ${name}...`);
+    const result = await loadBlueprint(bot, { filePath: path });
+    if (result.success) {
+      currentBlueprint = result.blueprint;
+      bot.chat(`Loaded: ${result.size.x}x${result.size.y}x${result.size.z}`);
+      bot.chat(`Blocks: ${result.totalBlocks}`);
+    }
+  } catch (error) {
+    bot.chat(`Error: ${error.message}`);
+  }
+  return;
+}
+
+// --- CHECK MATERIALS ---
+if (commandText.toLowerCase() === 'check materials') {
+  try {
+    if (!currentBlueprint) {
+      bot.chat('No blueprint loaded!');
+      return;
+    }
+    const result = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
+    if (result.hasAllResources) {
+      bot.chat('All materials available!');
+    } else {
+      bot.chat(`Missing ${Object.keys(result.missing).length} types:`);
+      Object.entries(result.missing).slice(0, 5).forEach(([item, count]) => {
+        bot.chat(`  ${item}: ${count}`);
+      });
+    }
+  } catch (error) {
+    bot.chat(`Error: ${error.message}`);
+  }
+  return;
+}
+
+// --- GATHER MATERIALS ---
+if (commandText.toLowerCase() === 'gather materials') {
+  try {
+    if (!currentBlueprint) {
+      bot.chat('No blueprint loaded!');
+      return;
+    }
+    const check = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
+    if (check.hasAllResources) {
+      bot.chat('Already have all materials!');
+      return;
+    }
+    bot.chat('Gathering materials...');
+    for (const [item, count] of Object.entries(check.missing)) {
+      bot.chat(`Getting ${count}x ${item}...`);
+      try {
+        const { give } = await import('./actions/give.js');
+        await give(bot, { playerName: username, itemName: item, count });
+        await sleep(500);
+      } catch (error) {
+        bot.chat(`Failed: ${item}`);
+      }
+    }
+    bot.chat('Done! Say "build" to start.');
+  } catch (error) {
+    bot.chat(`Error: ${error.message}`);
+  }
+  return;
+}
+
+// --- BUILD ---
+if (commandText.toLowerCase() === 'build' || 
+    commandText.toLowerCase() === 'build it') {
+  try {
+    if (!currentBlueprint) {
+      bot.chat('No blueprint loaded!');
+      return;
+    }
+    bot.chat('Building...');
+    const check = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
+    if (!check.hasAllResources) {
+      bot.chat('Missing materials! Say "gather materials"');
+      return;
+    }
+    const result = await buildStructure(bot, {
+      blueprint: currentBlueprint,
+      layerByLayer: true
+    });
+    if (result.success) {
+      bot.chat(`Done! Placed ${result.placed} blocks`);
+    } else {
+      bot.chat(`Failed: ${result.error}`);
+    }
+    currentBlueprint = null;
+  } catch (error) {
+    bot.chat(`Error: ${error.message}`);
+  }
+  return;
+}
+
+// --- QUICK BUILD ---
+if (commandText.toLowerCase().startsWith('build ') && 
+    commandText.includes('.schematic')) {
+  try {
+    const name = commandText.replace(/build /i, '').trim();
+    const path = `./schematics/${name}`;
+    bot.chat(`Loading ${name}...`);
+    const load = await loadBlueprint(bot, { filePath: path });
+    if (!load.success) {
+      bot.chat('Failed to load');
+      return;
+    }
+    currentBlueprint = load.blueprint;
+    bot.chat(`Loaded: ${load.totalBlocks} blocks`);
+    const check = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
+    if (!check.hasAllResources) {
+      bot.chat('Missing materials!');
+      return;
+    }
+    bot.chat('Building...');
+    const result = await buildStructure(bot, { blueprint: currentBlueprint, layerByLayer: true });
+    if (result.success) {
+      bot.chat(`Done! ${result.placed} blocks`);
+    }
+    currentBlueprint = null;
+  } catch (error) {
+    bot.chat(`Error: ${error.message}`);
+  }
+  return;
+}
+
+    // --- BUILD HELP ---
+    if (commandText.toLowerCase() === 'build help') {
+      bot.chat('Build Commands:');
+      bot.chat('  list blueprints');
+      bot.chat('  load blueprint <name>');
+      bot.chat('  check materials');
+      bot.chat('  gather materials');
+      bot.chat('  build');
+      bot.chat('  test build');
+      return;
+    }
+
     // Process with AI
     await processInGameCommand(username, commandText);
   });
@@ -264,8 +430,28 @@ async function executeAction(action, params, username) {
       result = await smelt(bot, params);
       break;
     
+    case 'load_blueprint':
+      result = await loadBlueprint(bot, params);
+      break;
+
+    case 'get_required_materials':
+      result = await getRequiredMaterials(bot, params);
+      break;
+
+    case 'build_structure':
+      result = await buildStructure(bot, params);
+      break;
+
+    case 'preview_build':
+      result = await previewBuild(bot, params);
+      break;
+
+    case 'list_schematics':
+      result = await listSchematics(bot, params);
+      break;
+    
     default:
-      bot.chat(`❌ Unknown action: ${action}`);
+      bot.chat(`Unknown action: ${action}`);
       return { success: false, message: `Unknown action: ${action}` };
   }
 
@@ -276,7 +462,7 @@ async function executeAction(action, params, username) {
 async function processInGameCommand(username, commandText) {
   isProcessing = true;
   
-  log(`\n🎯 Processing from ${username}: ${commandText}`);
+  log(`\nProcessing from ${username}: ${commandText}`);
   bot.chat(`🤔 Thinking...`);
 
   try {
@@ -305,7 +491,7 @@ async function processInGameCommand(username, commandText) {
     log(`📥 Response: ${response.status}`);
 
     if (response.status !== 200) {
-      bot.chat(`❌ AI error: ${response.status}`);
+      bot.chat(` AI error: ${response.status}`);
       isProcessing = false;
       return;
     }
@@ -314,7 +500,7 @@ async function processInGameCommand(username, commandText) {
     log(`📋 Parsed: ${JSON.stringify(parsedCommand)}`);
 
     if (parsedCommand.error) {
-      bot.chat(`❌ ${parsedCommand.error}`);
+      bot.chat(` ${parsedCommand.error}`);
       isProcessing = false;
       return;
     }
@@ -406,7 +592,10 @@ function getActionEmoji(action) {
     give: '🎁',
     navigate: '🗺️',
     respond: '💬',
-    smelt: '🔥'  
+    smelt: '🔥' ,
+    load_blueprint: '🏗️',      
+    build_structure: '🏗️',     
+    preview_build: '🏗️' 
   };
   return emojis[action] || '⚙️';
 }
@@ -429,6 +618,14 @@ function getActionDescription(action, params) {
       return `Going to ${params.x}, ${params.y}, ${params.z}`;
     case 'smelt':  // ADD THIS
       return `Smelting ${params.count || 1}x ${params.itemName}`;
+    case 'load_blueprint':
+      return `Loading blueprint: ${params.filePath}`;
+    case 'build_structure':
+      return `Building structure (${params.blueprint?.totalBlocks || '?'} blocks)`;
+    case 'preview_build':
+      return `Previewing build`;
+    case 'list_schematics':
+      return `Listing schematics`;
     default:
       return action;
   }
