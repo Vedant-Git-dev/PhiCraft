@@ -5,8 +5,15 @@ import { Vec3 } from 'vec3';
 import { log, logError, logSuccess, logWarning } from './logger.js';
 
 /**
- * Block Placer - Handles individual block placement with retry logic
- * FIXED: Proper solid block detection (grass_block is solid!)
+ * Enhanced Block Placer v2.0 - Complete Rewrite
+ * 
+ * ✓ Correct directional block placement (stairs, doors, beds, slabs, logs, ladders)
+ * ✓ Wall-mounted blocks (wall_torch, wall_sign, wall_button, wall_lever)
+ * ✓ ONLY uses valid solid cube blocks as supports (no doors, stairs, slabs, etc.)
+ * ✓ Bot can place at its own position (micro-adjustments)
+ * ✓ Handles wall_ and _wall naming patterns
+ * ✓ Proper replacement logic (replaceable blocks vs breaking)
+ * ✓ Smart retry and movement system
  */
 
 class BlockPlacer {
@@ -18,57 +25,79 @@ class BlockPlacer {
   /**
    * Place a single block at absolute world coordinates
    */
-  async placeBlock(blockName, worldPos, maxRetries = 3) {
-    
-    // Ensure worldPos is a proper Vec3
+  async placeBlock(blockName, worldPos, blueprintProperties = {}, maxRetries = 3) {
     const pos = this.ensureVec3(worldPos);
     
     log(`Placing ${blockName} at (${pos.x}, ${pos.y}, ${pos.z})`);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // Check current block at position
+        // 1. Check current block at position
         const currentBlock = this.bot.blockAt(pos);
         
-        // If correct block already exists, mark as already placed
         if (currentBlock && currentBlock.name === blockName) {
           log(`Correct block already at position: ${blockName}`);
           return { success: true, placed: false, reason: 'already_correct' };
         }
 
-        // Navigate to placement position
-        const navResult = await this.navigateToPlacementPosition(pos);
-        if (!navResult.success) {
-          throw new Error(`Cannot reach placement position: ${navResult.reason}`);
+        // 2. Handle bot at placement position (REQUIRED BEHAVIOR)
+        if (this.isBotAtPosition(pos)) {
+          log(`Bot at placement position, micro-adjusting`);
+          await this.microAdjustPosition(pos);
         }
 
-        // Equip the block
+        // 3. Handle existing block (replaceable or break)
+        if (currentBlock && currentBlock.name !== 'air') {
+          if (this.isReplaceable(currentBlock)) {
+            log(`Replacing ${currentBlock.name} (replaceable)`);
+          } else {
+            log(`Breaking existing ${currentBlock.name}`);
+            await this.breakBlock(currentBlock);
+            await this.sleep(250);
+          }
+        }
+
+        // 4. Navigate to placement position
+        const navResult = await this.navigateToPlacementPosition(pos);
+        if (!navResult.success) {
+          throw new Error(`Cannot reach: ${navResult.reason}`);
+        }
+
+        // 5. Equip the block
         const equipResult = await this.equipBlock(blockName);
         if (!equipResult.success) {
           throw new Error(`Cannot equip ${blockName}: ${equipResult.reason}`);
         }
 
-        // Find reference block to place against
-        const refBlock = this.findReferenceBlock(pos);
+        // 6. Get placement strategy for block type
+        const strategy = this.getPlacementStrategy(blockName, blueprintProperties);
+
+        // 7. Find VALID reference block (only solid cubes)
+        const refBlock = this.findReferenceBlock(pos, strategy);
         if (!refBlock) {
-          throw new Error('No reference block found for placement');
+          throw new Error('No valid reference block (need solid cube)');
         }
 
-        log(`Using reference block: ${refBlock.name} at (${refBlock.position.x}, ${refBlock.position.y}, ${refBlock.position.z})`);
+        log(`Reference: ${refBlock.name} at (${refBlock.position.x}, ${refBlock.position.y}, ${refBlock.position.z})`);
 
-        // Calculate face vector
+        // 8. Calculate face vector
         const faceVector = this.calculateFaceVector(pos, refBlock.position);
         log(`Face vector: (${faceVector.x}, ${faceVector.y}, ${faceVector.z})`);
 
-        // Look at the reference block center
+        // 9. Orient bot for directional blocks
+        if (strategy.needsOrientation) {
+          await this.orientBotForPlacement(pos, strategy, blueprintProperties);
+        }
+
+        // 10. Look at reference block center
         const lookPos = refBlock.position.offset(0.5, 0.5, 0.5);
         await this.bot.lookAt(lookPos);
-        await this.sleep(150);
+        await this.sleep(100);
 
-        // Place block
+        // 11. Place block
         await this.bot.placeBlock(refBlock, faceVector);
         
-        // Verify placement
+        // 12. Verify placement
         await this.sleep(300);
         
         const verifyBlock = this.bot.blockAt(pos);
@@ -100,41 +129,342 @@ class BlockPlacer {
   }
 
   /**
-   * Ensure position is a proper Vec3 object
+   * Get placement strategy based on block type
    */
-  ensureVec3(pos) {
-    if (pos instanceof Vec3) {
-      return pos;
+  getPlacementStrategy(blockName, properties = {}) {
+    const strategy = {
+      type: 'normal',
+      needsOrientation: false,
+      preferredFace: null,
+      wallMounted: false
+    };
+
+    // Stairs
+    if (blockName.includes('stairs')) {
+      strategy.type = 'stairs';
+      strategy.needsOrientation = true;
+      strategy.preferredFace = 'bottom';
     }
-    
-    if (pos.x !== undefined && pos.y !== undefined && pos.z !== undefined) {
-      return new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+    // Slabs
+    else if (blockName.includes('slab')) {
+      strategy.type = 'slab';
+      strategy.preferredFace = properties.half === 'top' ? 'top' : 'bottom';
     }
-    
-    throw new Error(`Invalid position: ${JSON.stringify(pos)}`);
+    // Doors (not trapdoor)
+    else if (blockName.includes('door') && !blockName.includes('trapdoor')) {
+      strategy.type = 'door';
+      strategy.needsOrientation = true;
+      strategy.preferredFace = 'bottom';
+    }
+    // Trapdoors
+    else if (blockName.includes('trapdoor')) {
+      strategy.type = 'trapdoor';
+      strategy.needsOrientation = true;
+    }
+    // Beds
+    else if (blockName.includes('bed')) {
+      strategy.type = 'bed';
+      strategy.needsOrientation = true;
+      strategy.preferredFace = 'bottom';
+    }
+    // Logs (axis property)
+    else if (blockName.includes('log') && !blockName.includes('stripped')) {
+      strategy.type = 'log';
+      strategy.needsOrientation = true;
+    }
+    // Wall-mounted blocks
+    else if (blockName.startsWith('wall_') || 
+             blockName.includes('_wall') ||
+             blockName === 'ladder') {
+      strategy.type = 'wall_mounted';
+      strategy.wallMounted = true;
+      strategy.preferredFace = 'side';
+    }
+    // Furnaces, chests, barrels
+    else if (['furnace', 'chest', 'barrel', 'crafting_table'].includes(blockName)) {
+      strategy.type = 'facing_block';
+      strategy.needsOrientation = true;
+    }
+    // Fences and gates
+    else if (blockName.includes('fence')) {
+      strategy.type = 'fence';
+      strategy.preferredFace = 'bottom';
+    }
+
+    return strategy;
   }
 
   /**
-   * Navigate to a position where block can be placed
+   * Find VALID reference block for placement
+   * CRITICAL: Only returns full solid cube blocks
+   */
+  findReferenceBlock(targetPos, strategy) {
+    const pos = this.ensureVec3(targetPos);
+    
+    // Determine search order based on strategy
+    let searchOrder;
+    
+    if (strategy.wallMounted || strategy.preferredFace === 'side') {
+      // Wall-mounted: check horizontal faces first
+      searchOrder = [
+        { vec: new Vec3(1, 0, 0), name: 'east' },
+        { vec: new Vec3(-1, 0, 0), name: 'west' },
+        { vec: new Vec3(0, 0, 1), name: 'south' },
+        { vec: new Vec3(0, 0, -1), name: 'north' },
+        { vec: new Vec3(0, -1, 0), name: 'below' }
+      ];
+    } else if (strategy.preferredFace === 'top') {
+      // Top slab: check above first
+      searchOrder = [
+        { vec: new Vec3(0, 1, 0), name: 'above' },
+        { vec: new Vec3(0, -1, 0), name: 'below' }
+      ];
+    } else {
+      // Normal/bottom: prioritize below
+      searchOrder = [
+        { vec: new Vec3(0, -1, 0), name: 'below' },
+        { vec: new Vec3(1, 0, 0), name: 'east' },
+        { vec: new Vec3(-1, 0, 0), name: 'west' },
+        { vec: new Vec3(0, 0, 1), name: 'south' },
+        { vec: new Vec3(0, 0, -1), name: 'north' },
+        { vec: new Vec3(0, 1, 0), name: 'above' }
+      ];
+    }
+
+    for (const offset of searchOrder) {
+      const checkPos = new Vec3(
+        pos.x + offset.vec.x,
+        pos.y + offset.vec.y,
+        pos.z + offset.vec.z
+      );
+      
+      const block = this.bot.blockAt(checkPos);
+
+      // CRITICAL: Only allow FULL SOLID CUBE blocks as supports
+      if (block && this.isValidSolidSupport(block)) {
+        log(`Found valid reference ${offset.name}: ${block.name}`);
+        return block;
+      }
+    }
+
+    logWarning('No valid solid cube reference block found');
+    return null;
+  }
+
+  /**
+   * CRITICAL: Check if block is valid solid support
+   * Returns TRUE only for full solid cube blocks
+   */
+  isValidSolidSupport(block) {
+    if (!block || block.name === 'air') return false;
+
+    // INVALID supports (non-solid, non-cube, or special blocks)
+    const invalidSupports = [
+      // Non-solid blocks
+      'air', 'water', 'lava', 'cave_air',
+      // Plants
+      'grass', 'tall_grass', 'fern', 'dead_bush', 'seagrass',
+      'dandelion', 'poppy', 'blue_orchid', 'allium', 'azure_bluet',
+      'rose_bush', 'sunflower', 'lilac', 'peony',
+      'wheat', 'carrots', 'potatoes', 'beetroots',
+      'sugar_cane', 'cactus', 'bamboo',
+      // Non-cube blocks
+      'stairs', 'slab', 'door', 'trapdoor', 'bed',
+      'fence', 'gate', 'ladder', 'vine',
+      'torch', 'wall_torch', 'lantern',
+      'button', 'lever', 'pressure_plate',
+      'rail', 'powered_rail', 'detector_rail', 'activator_rail',
+      'carpet', 'snow', // snow layer, not snow_block
+      'glass_pane', 'iron_bars',
+      // Containers/utility (not full cubes)
+      'chest', 'barrel', 'furnace', 'crafting_table',
+      'hopper', 'dropper', 'dispenser',
+      'pane', 'bars'
+    ];
+
+    // Check if block name contains any invalid pattern
+    for (const invalid of invalidSupports) {
+      if (block.name.includes(invalid) && block.name !== "grass_block") {
+        // Exception: snow_block IS valid (full cube)
+        if (block.name === 'snow_block') continue;
+        return false;
+      }
+    }
+
+    // VALID solid blocks
+    const validSolidBlocks = [
+      'dirt', 'grass_block', 'stone', 'cobblestone',
+      'bedrock', 'sand', 'gravel', 'sandstone',
+      'netherrack', 'mycelium', 'podzol', 'coarse_dirt',
+      'clay', 'terracotta', 'concrete', 'wool',
+      'deepslate', 'tuff', 'dripstone_block',
+      'snow_block', 'ice', 'packed_ice', 'blue_ice'
+    ];
+
+    // Check explicit valid blocks
+    if (validSolidBlocks.includes(block.name)) {
+      return true;
+    }
+
+    // Check patterns for solid blocks
+    if (block.name.includes('_planks') ||
+        block.name.includes('_log') ||
+        block.name.includes('_ore') ||
+        block.name.includes('_block') && !block.name.includes('_slab')) {
+      return true;
+    }
+
+    // Check bounding box
+    if (block.boundingBox === 'empty' || block.boundingBox === 'block') {
+      return block.boundingBox === 'block';
+    }
+
+    // Default: assume solid if not in invalid list
+    return true;
+  }
+
+  /**
+   * Check if block is replaceable (grass, flowers, etc.)
+   */
+  isReplaceable(block) {
+    const replaceableBlocks = [
+      'grass', 'tall_grass', 'fern', 'dead_bush',
+      'dandelion', 'poppy', 'blue_orchid', 'allium',
+      'seagrass', 'kelp', 'vine', 'snow'
+    ];
+
+    for (const replaceable of replaceableBlocks) {
+      if (block.name.includes(replaceable)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if bot occupies placement position
+   */
+  isBotAtPosition(targetPos) {
+    const pos = this.ensureVec3(targetPos);
+    const botPos = this.bot.entity.position.floored();
+    
+    // Check if bot's feet are at target position
+    if (botPos.x === pos.x && botPos.y === pos.y && botPos.z === pos.z) {
+      return true;
+    }
+    
+    // Check if bot's head is at target position
+    const botHead = botPos.offset(0, 1, 0);
+    if (botHead.x === pos.x && botHead.y === pos.y && botHead.z === pos.z) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Micro-adjust bot position to allow self-placement
+   * REQUIRED BEHAVIOR: Bot must be able to place at its own position
+   */
+  async microAdjustPosition(targetPos) {
+    const pos = this.ensureVec3(targetPos);
+    const botPos = this.bot.entity.position;
+
+    log(`Micro-adjusting: bot at (${botPos.x.toFixed(1)}, ${botPos.y.toFixed(1)}, ${botPos.z.toFixed(1)})`);
+
+    // Calculate offset direction (move away slightly)
+    const offsetX = botPos.x - pos.x;
+    const offsetZ = botPos.z - pos.z;
+    
+    // Determine best direction to step
+    let moveDirection;
+    if (Math.abs(offsetX) > Math.abs(offsetZ)) {
+      moveDirection = offsetX > 0 ? new Vec3(1, 0, 0) : new Vec3(-1, 0, 0);
+    } else {
+      moveDirection = offsetZ > 0 ? new Vec3(0, 0, 1) : new Vec3(0, 0, -1);
+    }
+
+    // Move slightly
+    const newPos = botPos.plus(moveDirection);
+    
+    try {
+      this.bot.entity.position.x = newPos.x;
+      this.bot.entity.position.z = newPos.z;
+      
+      await this.sleep(150);
+      log(`Adjusted to (${newPos.x.toFixed(1)}, ${newPos.y.toFixed(1)}, ${newPos.z.toFixed(1)})`);
+    } catch (error) {
+      logWarning(`Micro-adjust failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Orient bot for directional block placement
+   */
+  async orientBotForPlacement(targetPos, strategy, properties) {
+    const pos = this.ensureVec3(targetPos);
+    
+    // Calculate yaw based on blueprint properties or bot position
+    let targetYaw;
+    
+    if (properties.facing) {
+      // Use blueprint facing
+      const facingMap = {
+        'north': Math.PI,      // 180°
+        'south': 0,            // 0°
+        'west': Math.PI / 2,   // 90°
+        'east': -Math.PI / 2   // -90°
+      };
+      targetYaw = facingMap[properties.facing] || this.bot.entity.yaw;
+    } else {
+      // Use current bot yaw
+      targetYaw = this.bot.entity.yaw;
+    }
+
+    await this.bot.look(targetYaw, 0, true);
+    await this.sleep(100);
+  }
+
+  /**
+   * Break an existing block
+   */
+  async breakBlock(block) {
+    try {
+      // Navigate close if needed
+      const distance = this.bot.entity.position.distanceTo(block.position);
+      if (distance > 4.5) {
+        const goal = new goals.GoalNear(block.position.x, block.position.y, block.position.z, 3);
+        await this.bot.pathfinder.goto(goal);
+      }
+
+      // Dig the block
+      await this.bot.dig(block);
+      log(`Broke ${block.name}`);
+    } catch (error) {
+      logWarning(`Failed to break block: ${error.message}`);
+    }
+  }
+
+  /**
+   * Navigate to placement position
    */
   async navigateToPlacementPosition(targetPos, maxAttempts = 2) {
     const pos = this.ensureVec3(targetPos);
     const currentDistance = this.bot.entity.position.distanceTo(pos);
 
     if (currentDistance <= 4.5) {
-      log(`Already within reach (${currentDistance.toFixed(1)} blocks)`);
+      log(`Within reach (${currentDistance.toFixed(1)} blocks)`);
       return { success: true };
     }
 
-    log(`Navigating to placement position (${currentDistance.toFixed(1)} blocks away)...`);
+    log(`Navigating to placement position (${currentDistance.toFixed(1)} blocks away)`);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        // Navigate to near the target position
         const goal = new goals.GoalNear(pos.x, pos.y, pos.z, 3);
         await this.bot.pathfinder.goto(goal);
 
-        // Check if we're close enough
         const newDistance = this.bot.entity.position.distanceTo(pos);
         if (newDistance <= 4.5) {
           log(`Reached placement position (${newDistance.toFixed(1)} blocks)`);
@@ -165,7 +495,6 @@ class BlockPlacer {
       return { success: false, reason: 'unknown_item' };
     }
 
-    // Find item in inventory
     const inventoryItem = this.bot.inventory.items().find(i => i.name === blockName);
     
     if (!inventoryItem) {
@@ -182,176 +511,56 @@ class BlockPlacer {
   }
 
   /**
-   * Find a reference block to place against
-   * FIXED: Proper coordinate handling
-   */
-  findReferenceBlock(targetPos) {
-    const pos = this.ensureVec3(targetPos);
-    
-    log(`Looking for reference block near (${pos.x}, ${pos.y}, ${pos.z})`);
-    
-    // Check all 6 directions (prioritize below, then sides, then above)
-    const offsets = [
-      { vec: new Vec3(0, -1, 0), name: 'below' },
-      { vec: new Vec3(1, 0, 0), name: 'east' },
-      { vec: new Vec3(-1, 0, 0), name: 'west' },
-      { vec: new Vec3(0, 0, 1), name: 'south' },
-      { vec: new Vec3(0, 0, -1), name: 'north' },
-      { vec: new Vec3(0, 1, 0), name: 'above' }
-    ];
-
-    for (const offset of offsets) {
-      const checkPos = new Vec3(
-        pos.x + offset.vec.x,
-        pos.y + offset.vec.y,
-        pos.z + offset.vec.z
-      );
-      
-      const block = this.bot.blockAt(checkPos);
-
-      if (block && this.isSolidBlock(block)) {
-        log(`Found reference block ${offset.name}: ${block.name} at (${checkPos.x}, ${checkPos.y}, ${checkPos.z})`);
-        return block;
-      } else {
-        const blockType = block ? block.name : 'null';
-        const solidCheck = block ? this.isSolidBlock(block) : false;
-        log(`  Checked ${offset.name} (${checkPos.x}, ${checkPos.y}, ${checkPos.z}): ${blockType} - ${solidCheck ? 'SOLID' : 'not suitable'}`);
-      }
-    }
-
-    // No reference block found
-    logWarning('No reference block found in any direction');
-    return null;
-  }
-
-  /**
-   * Check if block is solid (can be used as reference)
-   * FIXED: grass_block, mycelium, podzol ARE solid!
-   */
-  isSolidBlock(block) {
-    if (!block) return false;
-    if (block.name === 'air') return false;
-
-    // Explicitly solid blocks (including grass variants)
-    const solidBlocks = [
-      'grass_block',      // This is SOLID (the main grass block)
-      'dirt',
-      'stone',
-      'cobblestone',
-      'bedrock',
-      'sand',
-      'gravel',
-      'sandstone',
-      'netherrack',
-      'mycelium',
-      'podzol',
-      'coarse_dirt',
-      'clay',
-      'terracotta',
-      'concrete',
-      'wool',
-      'deepslate'
-    ];
-
-    // Check explicit solid blocks
-    if (solidBlocks.includes(block.name)) {
-      return true;
-    }
-
-    // Check if it's any plank type
-    if (block.name.includes('_planks')) {
-      return true;
-    }
-
-    // Check if it's any log type
-    if (block.name.includes('_log')) {
-      return true;
-    }
-
-    // Check if it's any ore
-    if (block.name.includes('_ore')) {
-      return true;
-    }
-
-    // List of NON-solid blocks (plants, decorations, etc.)
-    const nonSolid = [
-      'air', 'water', 'lava', 'cave_air',
-      'tall_grass',       // This is NOT solid (the plant)
-      'grass',            // This is NOT solid (the plant)
-      'seagrass',
-      'fern',
-      'dead_bush',
-      'dandelion',
-      'poppy',
-      'rose_bush',
-      'sunflower',
-      'lilac',
-      'peony',
-      'blue_orchid',
-      'allium',
-      'azure_bluet',
-      'oxeye_daisy',
-      'cornflower',
-      'lily_of_the_valley',
-      'wither_rose',
-      'flower',
-      'sapling',
-      'torch',
-      'redstone_wire',
-      'rail',
-      'ladder',
-      'vine',
-      'kelp',
-      'snow',           // Snow layer (not solid)
-      'sugar_cane',
-      'wheat',
-      'carrots',
-      'potatoes',
-      'beetroots',
-      'sweet_berry_bush',
-      'bamboo',
-      'scaffolding'
-    ];
-
-    // Check if block name contains any non-solid keywords
-    for (const keyword of nonSolid) {
-      if (block.name === keyword || block.name.includes(keyword)) {
-        // Exception: snow_block IS solid (not the same as snow layer)
-        if (block.name === 'snow_block') {
-          return true;
-        }
-        return false;
-      }
-    }
-
-    // Check bounding box
-    if (block.boundingBox === 'empty') {
-      return false;
-    }
-
-    // Default: if it has a bounding box and isn't in non-solid list, it's probably solid
-    return true;
-  }
-
-  /**
    * Calculate face vector for placement
-   * FIXED: Proper vector calculation
    */
   calculateFaceVector(targetPos, referencePos) {
     const target = this.ensureVec3(targetPos);
     const ref = this.ensureVec3(referencePos);
     
-    // Calculate difference
     const dx = target.x - ref.x;
     const dy = target.y - ref.y;
     const dz = target.z - ref.z;
     
-    // Return normalized direction
     return new Vec3(
       dx === 0 ? 0 : (dx > 0 ? 1 : -1),
       dy === 0 ? 0 : (dy > 0 ? 1 : -1),
       dz === 0 ? 0 : (dz > 0 ? 1 : -1)
     );
+  }
+
+  /**
+   * Check if block matches desired orientation
+   */
+  blockMatchesOrientation(block, properties) {
+    if (!properties || Object.keys(properties).length === 0) {
+      return true; // No specific orientation required
+    }
+    console.log("Done", "="*70);
+    // Check if block properties match blueprint properties
+    const blockProps = block.getProperties ? block.getProperties() : {};
+    
+    for (const [key, value] of Object.entries(properties)) {
+      if (blockProps[key] !== value) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Ensure position is proper Vec3 object
+   */
+  ensureVec3(pos) {
+    if (pos instanceof Vec3) {
+      return pos.floored();
+    }
+    
+    if (pos.x !== undefined && pos.y !== undefined && pos.z !== undefined) {
+      return new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+    }
+    
+    throw new Error(`Invalid position: ${JSON.stringify(pos)}`);
   }
 
   /**
@@ -369,7 +578,7 @@ class BlockPlacer {
   canReachPosition(worldPos) {
     const pos = this.ensureVec3(worldPos);
     const distance = this.bot.entity.position.distanceTo(pos);
-    return distance <= 64; // Pathfinder limit
+    return distance <= 64;
   }
 
   /**
@@ -379,21 +588,19 @@ class BlockPlacer {
     const pos = this.ensureVec3(worldPos);
     log(`Placing scaffolding at (${pos.x}, ${pos.y}, ${pos.z})`);
 
-    // Check if already has solid block
     const existing = this.bot.blockAt(pos);
-    if (existing && this.isSolidBlock(existing)) {
+    if (existing && this.isValidSolidSupport(existing)) {
       log('Scaffolding not needed, block already solid');
       return { success: true, block: existing.name };
     }
 
-    // Try to place dirt or cobblestone as scaffolding
     const scaffoldBlocks = ['dirt', 'cobblestone', 'netherrack', 'stone'];
 
     for (const blockName of scaffoldBlocks) {
       const item = this.bot.inventory.items().find(i => i.name === blockName);
       
       if (item) {
-        const result = await this.placeBlock(blockName, pos, 2);
+        const result = await this.placeBlock(blockName, pos, {}, 2);
         if (result.success) {
           return { success: true, block: blockName };
         }

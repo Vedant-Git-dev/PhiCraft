@@ -4,8 +4,11 @@ import BlockPlacer from './blockPlacer.js';
 import ResourceCalculator from './resourceCalculator.js';
 
 /**
- * Build Executor - Executes building operations layer by layer
- * FIXED: Proper Vec3 coordinate conversion
+ * Build Executor v2.0 - Enhanced with user prompts
+ * 
+ * Now asks user for:
+ * - Base Y-level where build should start
+ * - X, Z coordinates for build origin
  */
 
 class BuildExecutor {
@@ -15,14 +18,158 @@ class BuildExecutor {
     this.resourceCalculator = new ResourceCalculator(bot);
     this.currentBuild = null;
     this.aborted = false;
+    this.userResponseCallback = null; // For getting user input
+  }
+
+  /**
+   * Set callback for user interaction
+   */
+  setUserResponseCallback(callback) {
+    this.userResponseCallback = callback;
+  }
+
+  /**
+   * Ask user for build parameters via chat
+   */
+  async askUserForBuildParameters(blueprint) {
+    log('\n=== ASKING USER FOR BUILD PARAMETERS ===');
+    
+    // Get bot's current position as default
+    const botPos = this.bot.entity.position.floored();
+    
+    // Ask for Y-level
+    this.bot.chat(`What Y-level should the build start at? (Current: ${botPos.y})`);
+    this.bot.chat(`Type a number, or say "current" to use ${botPos.y}`);
+    
+    const yLevel = await this.waitForUserResponse('y_level', botPos.y);
+    
+    // Ask for X coordinate
+    this.bot.chat(`What X coordinate? (Current: ${botPos.x})`);
+    this.bot.chat(`Type a number, or say "current"`);
+    
+    const xCoord = await this.waitForUserResponse('x_coord', botPos.x);
+    
+    // Ask for Z coordinate
+    this.bot.chat(`What Z coordinate? (Current: ${botPos.z})`);
+    this.bot.chat(`Type a number, or say "current"`);
+    
+    const zCoord = await this.waitForUserResponse('z_coord', botPos.z);
+    
+    const origin = new Vec3(xCoord, yLevel, zCoord);
+    
+    this.bot.chat(`Build will start at: (${origin.x}, ${origin.y}, ${origin.z})`);
+    this.bot.chat(`Size: ${blueprint.size.x}x${blueprint.size.y}x${blueprint.size.z}`);
+    this.bot.chat(`Say "confirm" to proceed, or "cancel" to abort`);
+    
+    const confirmed = await this.waitForUserConfirmation();
+    
+    if (!confirmed) {
+      throw new Error('Build cancelled by user');
+    }
+    
+    logSuccess(`User confirmed build at (${origin.x}, ${origin.y}, ${origin.z})`);
+    return origin;
+  }
+
+  /**
+   * Wait for user to provide a numeric value
+   */
+  async waitForUserResponse(paramName, defaultValue) {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        log(`No response for ${paramName}, using default: ${defaultValue}`);
+        resolve(defaultValue);
+      }, 60000); // 60 second timeout
+
+      // Store resolver for callback
+      this.currentPrompt = {
+        paramName,
+        defaultValue,
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        }
+      };
+    });
+  }
+
+  /**
+   * Wait for user confirmation
+   */
+  async waitForUserConfirmation() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        log('No confirmation, cancelling build');
+        resolve(false);
+      }, 60000);
+
+      this.currentPrompt = {
+        paramName: 'confirm',
+        resolve: (confirmed) => {
+          clearTimeout(timeout);
+          resolve(confirmed);
+        }
+      };
+    });
+  }
+
+  /**
+   * Handle user response (called from chat handler)
+   */
+  handleUserResponse(message) {
+    if (!this.currentPrompt) return false;
+
+    const lowerMsg = message.toLowerCase().trim();
+    
+    if (this.currentPrompt.paramName === 'confirm') {
+      if (lowerMsg === 'confirm' || lowerMsg === 'yes' || lowerMsg === 'y') {
+        this.currentPrompt.resolve(true);
+        this.currentPrompt = null;
+        return true;
+      } else if (lowerMsg === 'cancel' || lowerMsg === 'no' || lowerMsg === 'n') {
+        this.currentPrompt.resolve(false);
+        this.currentPrompt = null;
+        return true;
+      }
+      return false;
+    }
+
+    // Handle numeric inputs
+    if (lowerMsg === 'current') {
+      this.currentPrompt.resolve(this.currentPrompt.defaultValue);
+      this.currentPrompt = null;
+      return true;
+    }
+
+    const numValue = parseInt(lowerMsg);
+    if (!isNaN(numValue)) {
+      this.currentPrompt.resolve(numValue);
+      this.currentPrompt = null;
+      return true;
+    }
+
+    return false;
   }
 
   /**
    * Execute complete building operation
    */
   async buildStructure(blueprint, originPos, options = {}) {
-    // Ensure origin is Vec3 and floored
-    const origin = this.ensureVec3Floor(originPos);
+    // If no origin provided, ask user
+    let origin;
+    if (!originPos) {
+      try {
+        origin = await this.askUserForBuildParameters(blueprint);
+      } catch (error) {
+        return {
+          success: false,
+          status: 'cancelled',
+          message: error.message
+        };
+      }
+    } else {
+      origin = this.ensureVec3Floor(originPos);
+    }
     
     log(`\n=== STARTING BUILD ===`);
     log(`Origin: (${origin.x}, ${origin.y}, ${origin.z})`);
@@ -119,8 +266,12 @@ class BuildExecutor {
           continue;
         }
 
-        // Place block
-        const result = await this.blockPlacer.placeBlock(block.name, worldPos);
+        // Place block with blueprint properties
+        const result = await this.blockPlacer.placeBlock(
+          block.name, 
+          worldPos, 
+          block.properties || {}
+        );
 
         if (result.success) {
           if (result.placed) {
@@ -139,7 +290,7 @@ class BuildExecutor {
             await this.blockPlacer.placeScaffolding(scaffoldPos);
             
             // Retry placement
-            const retryResult = await this.blockPlacer.placeBlock(block.name, worldPos);
+            const retryResult = await this.blockPlacer.placeBlock(block.name, worldPos, block.properties || {});
             if (retryResult.success) {
               this.currentBuild.placedBlocks++;
               this.currentBuild.failedBlocks--;
@@ -207,8 +358,6 @@ class BuildExecutor {
     const baseY = origin.y;
 
     log(`Base Y level: ${baseY}`);
-
-    // Just ensure the base layer has solid blocks below
     log('Checking foundation...');
     
     for (let x = 0; x < sizeX; x++) {
@@ -216,7 +365,6 @@ class BuildExecutor {
         const checkPos = new Vec3(origin.x + x, baseY - 1, origin.z + z);
         const block = this.bot.blockAt(checkPos);
 
-        // If not solid, try to fill
         if (!block || !this.isSolidGround(block)) {
           log(`Foundation missing at (${checkPos.x}, ${checkPos.y}, ${checkPos.z})`);
           await this.fillGroundBlock(checkPos);
@@ -240,7 +388,6 @@ class BuildExecutor {
 
     let cleared = 0;
 
-    // Clear from bottom to top
     for (let y = 0; y < sizeY; y++) {
       for (let x = 0; x < sizeX; x++) {
         for (let z = 0; z < sizeZ; z++) {
@@ -252,22 +399,18 @@ class BuildExecutor {
 
           const block = this.bot.blockAt(worldPos);
 
-          // Skip if already air
           if (!block || block.name === 'air') {
             continue;
           }
 
-          // Check if this position has a block in blueprint
           const blueprintBlock = blueprint.blocks.find(
             b => b.x === x && b.y === y && b.z === z
           );
 
-          // If blueprint has a block here and it matches, skip
           if (blueprintBlock && block.name === blueprintBlock.name) {
             continue;
           }
 
-          // Otherwise, clear this block
           try {
             await this.clearBlock(worldPos);
             cleared++;
@@ -301,7 +444,6 @@ class BuildExecutor {
       return;
     }
 
-    // Navigate to block
     const distance = this.bot.entity.position.distanceTo(pos);
     if (distance > 4.5) {
       const pathfinderPlugin = await import('mineflayer-pathfinder');
@@ -315,7 +457,6 @@ class BuildExecutor {
       }
     }
 
-    // Dig the block
     try {
       await this.bot.dig(block);
       await this.sleep(150);
@@ -331,12 +472,10 @@ class BuildExecutor {
     const pos = this.ensureVec3Floor(worldPos);
     const existingBlock = this.bot.blockAt(pos);
     
-    // Already solid
     if (existingBlock && this.isSolidGround(existingBlock)) {
       return;
     }
 
-    // Try to place dirt, stone, or cobblestone
     const fillMaterials = ['dirt', 'cobblestone', 'stone', 'netherrack'];
 
     for (const material of fillMaterials) {
@@ -380,7 +519,6 @@ class BuildExecutor {
       return [...blocks];
     }
 
-    // Sort by Y (bottom to top), then X, then Z
     return [...blocks].sort((a, b) => {
       if (a.y !== b.y) return a.y - b.y;
       if (a.x !== b.x) return a.x - b.x;
@@ -390,7 +528,6 @@ class BuildExecutor {
 
   /**
    * Convert relative blueprint coordinates to world coordinates
-   * FIXED: Proper Vec3 creation
    */
   relativeToWorld(block, originPos) {
     const origin = this.ensureVec3Floor(originPos);
@@ -461,7 +598,6 @@ class BuildExecutor {
     const issues = [];
     const warnings = [];
 
-    // Check resources
     const resourceReport = this.resourceCalculator.getResourceReport(blueprint);
     
     if (!resourceReport.hasAllResources) {
@@ -478,7 +614,6 @@ class BuildExecutor {
       });
     }
 
-    // Check if origin is reachable
     const canReach = this.blockPlacer.canReachPosition(origin);
     if (!canReach) {
       issues.push({

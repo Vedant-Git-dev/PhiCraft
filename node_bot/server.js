@@ -34,7 +34,7 @@ let currentAction = null;
 let craftingChain = null;
 let isProcessing = false;
 let currentBlueprint = null;
-
+let buildExecutor = null;
 
 const COLAB_SERVER_URL = process.env.COLAB_SERVER_URL || 'http://localhost:5000';
 
@@ -119,6 +119,13 @@ function createBot() {
 
   bot.on('chat', async (username, message) => {
     if (username === bot.username) return;
+
+    if (buildExecutor && buildExecutor.currentPrompt) {
+      const handled = buildExecutor.handleUserResponse(message);
+      if (handled) {
+        return; // Message was a response to build prompt
+  }
+}
 
     log(`💬 <${username}> ${message}`);
 
@@ -270,55 +277,41 @@ if (commandText.toLowerCase() === 'build' ||
       bot.chat('No blueprint loaded!');
       return;
     }
-    bot.chat('Building...');
+    
     const check = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
     if (!check.hasAllResources) {
       bot.chat('Missing materials! Say "gather materials"');
       return;
     }
-    const result = await buildStructure(bot, {
-      blueprint: currentBlueprint,
-      layerByLayer: true
+    
+    bot.chat('Starting build process...');
+    
+    // Initialize build executor
+    if (!buildExecutor) {
+      const BuildExecutor = (await import('./utils/buildExecutor.js')).default;
+      buildExecutor = new BuildExecutor(bot);
+    }
+    
+    // Build will ask user for Y-level and coordinates
+    const result = await buildExecutor.buildStructure(currentBlueprint, null, {
+      layerByLayer: true,
+      prepareGround: true,
+      clearArea: true
     });
+    
     if (result.success) {
-      bot.chat(`Done! Placed ${result.placed} blocks`);
+      bot.chat(`✅ Build complete! Placed ${result.placed} blocks in ${result.duration}s`);
+      bot.chat(`Failed: ${result.failed}, Skipped: ${result.skipped}, Cleared: ${result.cleared}`);
+    } else if (result.status === 'cancelled') {
+      bot.chat(`Build cancelled`);
     } else {
-      bot.chat(`Failed: ${result.error}`);
+      bot.chat(`❌ Build failed: ${result.error || result.message}`);
     }
+    
     currentBlueprint = null;
   } catch (error) {
     bot.chat(`Error: ${error.message}`);
-  }
-  return;
-}
-
-// --- QUICK BUILD ---
-if (commandText.toLowerCase().startsWith('build ') && 
-    commandText.includes('.schematic')) {
-  try {
-    const name = commandText.replace(/build /i, '').trim();
-    const path = `./schematics/${name}`;
-    bot.chat(`Loading ${name}...`);
-    const load = await loadBlueprint(bot, { filePath: path });
-    if (!load.success) {
-      bot.chat('Failed to load');
-      return;
-    }
-    currentBlueprint = load.blueprint;
-    bot.chat(`Loaded: ${load.totalBlocks} blocks`);
-    const check = await getRequiredMaterials(bot, { blueprint: currentBlueprint });
-    if (!check.hasAllResources) {
-      bot.chat('Missing materials!');
-      return;
-    }
-    bot.chat('Building...');
-    const result = await buildStructure(bot, { blueprint: currentBlueprint, layerByLayer: true });
-    if (result.success) {
-      bot.chat(`Done! ${result.placed} blocks`);
-    }
-    currentBlueprint = null;
-  } catch (error) {
-    bot.chat(`Error: ${error.message}`);
+    logError(`Build error: ${error.message}`);
   }
   return;
 }
@@ -331,7 +324,6 @@ if (commandText.toLowerCase().startsWith('build ') &&
       bot.chat('  check materials');
       bot.chat('  gather materials');
       bot.chat('  build');
-      bot.chat('  test build');
       return;
     }
 
@@ -439,7 +431,27 @@ async function executeAction(action, params, username) {
       break;
 
     case 'build_structure':
-      result = await buildStructure(bot, params);
+      // Initialize build executor if needed
+      if (!buildExecutor) {
+        const BuildExecutor = (await import('./utils/buildExecutor.js')).default;
+        buildExecutor = new BuildExecutor(bot);
+      }
+      
+      result = await buildExecutor.buildStructure(
+        params.blueprint, 
+        params.position, 
+        {
+          layerByLayer: params.layerByLayer !== false,
+          scaffolding: params.scaffolding || false,
+          prepareGround: params.prepareGround !== false,
+          clearArea: params.clearArea !== false,
+          progressCallback: (progress) => {
+            if (progress.current % 20 === 0) {
+              log(`Build progress: ${progress.current}/${progress.total} (${progress.placed} placed)`);
+            }
+          }
+        }
+      );
       break;
 
     case 'preview_build':
