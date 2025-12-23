@@ -198,7 +198,7 @@ COLAB_SERVER_URL=https://xxxx-xxx-xxx.ngrok.io
 # API Server
 NODE_PORT=3000
 
-# Debug
+# Debug (optional)
 DEBUG=false
 ```
 
